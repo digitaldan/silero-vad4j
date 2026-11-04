@@ -1,0 +1,9 @@
+# IDEs
+.vscode
+.idea/
+*.iml
+
+# Java build artefacts
+target/
+
+.DS_Store
