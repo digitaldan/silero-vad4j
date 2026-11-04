@@ -1,0 +1,20 @@
+This content is produced and maintained by the jVoice project.
+
+* Project home: https://github.com/jvoice-project
+
+== Declared Project Licenses
+
+This program and the accompanying materials are made available under the terms
+of the Apache License, Version 2.0 which is available at
+https://www.apache.org/licenses/LICENSE-2.0.
+
+== Source Code
+
+https://github.com/jvoice-project/silero-vad
+
+== Third-party Content
+
+Silero VAD model weights
+* License: MIT License
+* Project: https://github.com/snakers4/silero-vad
+* Source: https://github.com/snakers4/silero-vad/tree/master/src/silero_vad/data
