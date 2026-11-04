@@ -1,0 +1,91 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+    paths-ignore:
+      - '**/*.md'
+  pull_request:
+  workflow_dispatch:
+
+env:
+  JAVA_VERSION: 21
+  JAVA_DISTRO: temurin
+
+jobs:
+  build:
+    name: Maven Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Java
+        uses: actions/setup-java@v6.1.0
+        with:
+          distribution: ${{ env.JAVA_DISTRO }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+      - name: Build with Maven
+        run: ./mvnw -B package -DskipTests -Dsource.skip=true
+      - name: Test
+        run: ./mvnw -B test
+
+  deploy:
+    name: Deploy to Maven Central
+    if: github.repository == 'jvoice-project/silero-vad4j' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: build
+    environment: central-deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      # Deploy
+      - name: Set up Maven Central Repository
+        uses: actions/setup-java@v6.1.0
+        with:
+          distribution: ${{ env.JAVA_DISTRO }}
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: maven
+          server-id: central
+          server-username-env-var: MAVEN_CENTRAL_USERNAME
+          server-password-env-var: MAVEN_CENTRAL_TOKEN
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase-env-var: MAVEN_GPG_PASSPHRASE
+      - name: Deploy with Maven
+        id: deploy
+        run: |
+          ./mvnw -B deploy -DskipTests -Pci-cd
+          VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout)
+
+          # Remove suffix like -SNAPSHOT
+          VERSION="${VERSION%%-*}"
+          # Split x.y.z.v
+          BASE_VERSION="${VERSION%.*}" # x.y.z
+          REVISION="${VERSION##*.}"    # v
+
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "SILERO_VERSION=$BASE_VERSION" >> $GITHUB_OUTPUT
+          echo "REVISION=$REVISION" >> $GITHUB_OUTPUT
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_USERNAME }}
+          MAVEN_CENTRAL_TOKEN: ${{ secrets.MAVEN_TOKEN }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+      - name: Release
+        uses: softprops/action-gh-release@v3
+        id: create_release
+        with:
+          name: Silero VAD for Java v${{ steps.deploy.outputs.VERSION }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: >-
+            A plain Java inference library for [Silero VAD](https://github.com/snakers4/silero-vad) 
+            v${{ steps.deploy.outputs.SILERO_VERSION }}, revision ${{ steps.deploy.outputs.REVISION }}.
+          files: |
+            target/silero-vad4j-${{ steps.deploy.outputs.VERSION }}.jar
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
