@@ -7,10 +7,10 @@ Create a new release:
 ./mvnw release:clean
 ```
 
-Push the tag to GitHub:
+Push the release commits and tag to GitHub:
 
 ```shell
-git push --tags
+git push origin main --follow-tags
 ```
 
 GitHub Actions will publish the artifacts to Maven Central.

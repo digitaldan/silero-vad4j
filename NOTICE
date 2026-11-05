@@ -10,11 +10,17 @@ https://www.apache.org/licenses/LICENSE-2.0.
 
 == Source Code
 
-https://github.com/jvoice-project/silero-vad
+https://github.com/jvoice-project/silero-vad4j
 
 == Third-party Content
 
-Silero VAD model weights
+Silero VAD model weights (src/main/resources/io/github/jvoiceproject/silerovad/silero_vad_16k.bin),
+exported from silero_vad.onnx v6.2.3 (sha256 1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3)
 * License: MIT License
 * Project: https://github.com/snakers4/silero-vad
-* Source: https://github.com/snakers4/silero-vad/tree/master/src/silero_vad/data
+* Source: https://github.com/snakers4/silero-vad/tree/v6.2.3/src/silero_vad/data
+
+Test audio (src/test/resources/speech.wav), synthesized by Piper TTS with the en_US-ljspeech-medium voice
+* License: MIT License, voice trained on the public domain LJ Speech dataset
+* Project: https://github.com/OHF-Voice/piper1-gpl
+* Source: https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/ljspeech/medium
