@@ -66,6 +66,9 @@ public class SileroVAD {
     /** Hidden state & LSTM input size used in the LSTM and dense output projection layers. */
     private static final int HIDDEN = 128;
 
+    /** Number of temporal frames generated during STFT analysis per input block. */
+    private static final int STFT_FRAMES = (CONTEXT_SIZE + FRAME_SIZE + PAD - WINDOW) / HOP + 1;
+
     private static final String WEIGHTS = "silero_vad_16k.bin";
 
     private static Weights sharedWeights;
@@ -91,6 +94,22 @@ public class SileroVAD {
      * Working buffer for the concatenated LSTM gate pre-activations (input, forget, cell, output).
      */
     private final float[] gates = new float[4 * HIDDEN];
+
+    // Preallocated buffers for zero-allocation inference in the hot path
+    /** Preallocated magnitude spectrogram buffer of shape {@code [BINS][STFT_FRAMES]}. */
+    private final float[][] magnitude = new float[BINS][STFT_FRAMES];
+
+    /** Output activation buffer of the 1st convolution layer (shape: 128 x 4). */
+    private final float[][] convOut0 = new float[128][4];
+
+    /** Output activation buffer of the 2nd convolution layer with stride 2 (shape: 64 x 2). */
+    private final float[][] convOut1 = new float[64][2];
+
+    /** Output activation buffer of the 3rd convolution layer with stride 2 (shape: 64 x 1). */
+    private final float[][] convOut2 = new float[64][1];
+
+    /** Output activation buffer of the 4th convolution layer (shape: 128 x 1). */
+    private final float[][] convOut3 = new float[128][1];
 
     /**
      * Creates a new detector and initializes (or reuses) the shared model weights.
@@ -164,10 +183,8 @@ public class SileroVAD {
             padded[input.length + i] = input[input.length - 2 - i];
         }
 
-        // STFT computation
-        int frames = (padded.length - WINDOW) / HOP + 1;
-        float[][] magnitude = new float[BINS][frames];
-        for (int t = 0; t < frames; t++) {
+        // STFT computation directly into reused magnitude buffer
+        for (int t = 0; t < STFT_FRAMES; t++) {
             int offset = t * HOP;
             for (int bin = 0; bin < BINS; bin++) {
                 float re = dot(w.stftBasis, bin * WINDOW, padded, offset, WINDOW);
@@ -176,33 +193,35 @@ public class SileroVAD {
             }
         }
 
-        // Conv1D computation + ReLU layers
-        float[][] x = magnitude;
-        for (int i = 0; i < 4; i++) {
-            x = convRelu(x, w.convWeights[i], w.convBias[i], i == 1 || i == 2 ? 2 : 1);
-        }
+        // Conv1D computation + ReLU layers into reused output buffers
+        convRelu(magnitude, w.convWeights[0], w.convBias[0], 1, convOut0);
+        convRelu(convOut0, w.convWeights[1], w.convBias[1], 2, convOut1);
+        convRelu(convOut1, w.convWeights[2], w.convBias[2], 2, convOut2);
+        convRelu(convOut2, w.convWeights[3], w.convBias[3], 1, convOut3);
 
-        float[] features = new float[HIDDEN];
-        for (int i = 0; i < HIDDEN; i++) {
-            features[i] = x[i][0];
-        }
-
-        // LSTM Gate computation
+        // LSTM Gate computation (convOut3 has shape [128][1], acting directly as feature vector)
         for (int g = 0; g < 4 * HIDDEN; g++) {
-            gates[g] =
-                    w.lstmBias[g]
-                            + dot(w.lstmInput, g * HIDDEN, features, 0, HIDDEN)
-                            + dot(w.lstmHidden, g * HIDDEN, h, 0, HIDDEN);
-        }
-        // PyTorch gate order: input, forget, cell, output
-        for (int i = 0; i < HIDDEN; i++) {
-            c[i] =
-                    sigmoid(gates[HIDDEN + i]) * c[i]
-                            + sigmoid(gates[i]) * (float) Math.tanh(gates[2 * HIDDEN + i]);
-            h[i] = sigmoid(gates[3 * HIDDEN + i]) * (float) Math.tanh(c[i]);
+            float sum = w.lstmBias[g];
+            int inputWeightBase = g * HIDDEN;
+            for (int i = 0; i < HIDDEN; i++) {
+                sum += w.lstmInput[inputWeightBase + i] * convOut3[i][0];
+            }
+            sum += dot(w.lstmHidden, g * HIDDEN, h, 0, HIDDEN);
+            gates[g] = sum;
         }
 
-        // Final linear classification layer + ReLU activation
+        // PyTorch gate order: input (i), forget (f), cell (g), output (o)
+        for (int i = 0; i < HIDDEN; i++) {
+            float inGate = sigmoid(gates[i]);
+            float forgetGate = sigmoid(gates[HIDDEN + i]);
+            float cellGate = (float) Math.tanh(gates[2 * HIDDEN + i]);
+            float outGate = sigmoid(gates[3 * HIDDEN + i]);
+
+            c[i] = forgetGate * c[i] + inGate * cellGate;
+            h[i] = outGate * (float) Math.tanh(c[i]);
+        }
+
+        // ReLU activation on h, then linear projection and sigmoid
         float out = w.outBias;
         for (int i = 0; i < HIDDEN; i++) {
             out += w.outWeight[i] * Math.max(h[i], 0f);
@@ -217,13 +236,15 @@ public class SileroVAD {
      * @param weight flattened convolution kernel weights
      * @param bias bias vector per output channel
      * @param stride temporal stride (e.g., 1 or 2)
+     * @param y preallocated destination array of shape {@code [outChannels][outLength]}
      */
-    private static float[][] convRelu(float[][] x, float[] weight, float[] bias, int stride) {
+    private static void convRelu(
+            float[][] x, float[] weight, float[] bias, int stride, float[][] y) {
         int inChannels = x.length;
         int inLength = x[0].length;
         int outChannels = bias.length;
-        int outLength = (inLength - 1) / stride + 1;
-        float[][] y = new float[outChannels][outLength];
+        int outLength = y[0].length;
+
         for (int o = 0; o < outChannels; o++) {
             for (int t = 0; t < outLength; t++) {
                 float sum = bias[o];
@@ -239,7 +260,6 @@ public class SileroVAD {
                 y[o][t] = Math.max(sum, 0f);
             }
         }
-        return y;
     }
 
     /**
