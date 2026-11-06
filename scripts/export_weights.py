@@ -25,6 +25,19 @@ TRAILING_SILENCE = 8000
 
 
 def load_weights(path):
+    """Load and extract constant model weights for the 16 kHz branch.
+
+    Inspects the ONNX computational graph, locates the conditional `If` node
+    discriminating between sample rates, and extracts constant tensor attributes
+    from the 16 kHz `then_branch`.
+
+    Args:
+        path (str): File system path to the input `silero_vad.onnx` model.
+
+    Returns:
+        dict[str, np.ndarray]: Mapping of parameter names to weight arrays
+        represented as 32-bit floating-point numbers.
+    """
     model = onnx.load(path)
     # the If node holds a 16 kHz (then) and an 8 kHz (else) branch
     branch = next(n for n in model.graph.node if n.op_type == "If")
@@ -40,6 +53,21 @@ def load_weights(path):
 
 
 def export(weights, out):
+    """Serialize extracted model weights into a contiguous raw binary blob.
+
+    Packs the weights in the exact order and memory layout expected by
+    `SileroVAD.Weights` in the Java implementation:
+      - STFT forward basis buffer
+      - 4x Encoder reparam convolution weights and biases
+      - Decoder RNN weights (ih, hh) and fused biases (ih + hh)
+      - Decoder final linear layer weight and bias
+
+    Weights are serialized as raw 32-bit little-endian floats (`<f4`).
+
+    Args:
+        weights (dict[str, np.ndarray]): Dictionary containing the extracted weights.
+        out (str): Destination path for the `.bin` output file.
+    """
     # order and layout must match SileroVAD.Weights
     names = ["stft.forward_basis_buffer"]
     names += [f"encoder.{i}.reparam_conv.{p}" for i in range(4) for p in ("weight", "bias")]
@@ -55,6 +83,21 @@ def export(weights, out):
 
 
 def reference(path, wav, out):
+    """Run ONNX runtime inference on a test WAV file and export probability reference values.
+
+    Reads a 16 kHz mono WAV file, appends trailing silence samples, and processes
+    the audio in overlapping frames (64 samples context + 512 samples chunk).
+    The resulting frame-by-frame speech probabilities are formatted to 6 decimal places
+    and written to disk for regression and consistency testing.
+
+    Args:
+        path (str): File system path to the input `silero_vad.onnx` model.
+        wav (str): File system path to the 16 kHz mono reference WAV file.
+        out (str): Destination text file path for writing probability values.
+
+    Raises:
+        AssertionError: If the input WAV file is not 16 kHz, mono, or 16-bit PCM.
+    """
     with wave.open(wav) as w:
         assert w.getframerate() == 16000 and w.getnchannels() == 1 and w.getsampwidth() == 2
         audio = np.frombuffer(w.readframes(w.getnframes()), np.int16)
@@ -77,6 +120,7 @@ def reference(path, wav, out):
 
 
 def main():
+    """Parse CLI arguments, print checksums, and orchestrate export and reference generation."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("onnx", help="path to silero_vad.onnx")
     args = parser.parse_args()
