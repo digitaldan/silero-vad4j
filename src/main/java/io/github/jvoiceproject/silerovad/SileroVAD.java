@@ -47,25 +47,52 @@ public class SileroVAD {
     /** Number of samples per frame, 32 ms at {@link #SAMPLE_RATE}. */
     public static final int FRAME_SIZE = 512;
 
+    /** Number of samples preserved from the previous frame as preceding context. */
     private static final int CONTEXT_SIZE = 64;
+
+    /** Number of samples padded onto the end of the input buffer using reflect padding. */
     private static final int PAD = 64;
+
+    /** Window size for the Short-Time Fourier Transform (STFT). */
     private static final int WINDOW = 256;
+
+    /** Hop length (step size) between consecutive STFT analysis frames. */
     private static final int HOP = 128;
+
+    /** Number of frequency bins produced by the STFT ({@code WINDOW / 2 + 1}). */
     private static final int BINS = 129;
+
+    /** Hidden state & LSTM input size used in the LSTM and dense output projection layers. */
     private static final int HIDDEN = 128;
+
     private static final String WEIGHTS = "silero_vad_16k.bin";
 
     private static Weights sharedWeights;
 
     private final Weights w;
+
+    /** Internal input buffer holding both preceding context and current frame samples. */
     private final float[] input = new float[CONTEXT_SIZE + FRAME_SIZE];
+
+    /**
+     * Padded input buffer containing preceding context, current frame samples, and right-side
+     * reflect padding.
+     */
     private final float[] padded = new float[CONTEXT_SIZE + FRAME_SIZE + PAD];
+
+    /** Hidden state vector {@code h} of the recurrent LSTM cell. */
     private final float[] h = new float[HIDDEN];
+
+    /** Cell state vector {@code c} of the recurrent LSTM cell. */
     private final float[] c = new float[HIDDEN];
+
+    /**
+     * Working buffer for the concatenated LSTM gate pre-activations (input, forget, cell, output).
+     */
     private final float[] gates = new float[4 * HIDDEN];
 
     /**
-     * Creates a new detector.
+     * Creates a new detector and initializes (or reuses) the shared model weights.
      *
      * @throws IOException when the bundled weights can't be loaded
      */
@@ -76,8 +103,8 @@ public class SileroVAD {
     /**
      * Processes the next frame of a stream.
      *
-     * @param frame {@link #FRAME_SIZE} signed 16 bit samples
-     * @return speech probability between 0 and 1
+     * @param frame exactly {@link #FRAME_SIZE} signed 16-bit samples
+     * @return speech probability in {@code [0, 1]}
      * @throws IllegalArgumentException when the frame doesn't have {@link #FRAME_SIZE} samples
      */
     public synchronized float process(short[] frame) {
@@ -92,8 +119,9 @@ public class SileroVAD {
     /**
      * Processes the next frame of a stream.
      *
-     * @param frame {@link #FRAME_SIZE} samples between -1 and 1
-     * @return speech probability between 0 and 1
+     * @param frame exactly {@link #FRAME_SIZE} normalized floating-point audio samples in [-1.0,
+     *     1.0]
+     * @return speech probability in {@code [0, 1]}
      * @throws IllegalArgumentException when the frame doesn't have {@link #FRAME_SIZE} samples
      */
     public synchronized float process(float[] frame) {
@@ -121,13 +149,19 @@ public class SileroVAD {
         System.arraycopy(input, FRAME_SIZE, input, 0, CONTEXT_SIZE);
     }
 
+    /**
+     * Executes neural network inference across STFT, Conv1D, LSTM, and linear layers.
+     *
+     * @return speech probability in {@code [0, 1]}
+     */
     private float infer() {
-        // reflect pad the right side
+        // Reflect pad the right side
         System.arraycopy(input, 0, padded, 0, input.length);
         for (int i = 0; i < PAD; i++) {
             padded[input.length + i] = input[input.length - 2 - i];
         }
 
+        // STFT computation
         int frames = (padded.length - WINDOW) / HOP + 1;
         float[][] magnitude = new float[BINS][frames];
         for (int t = 0; t < frames; t++) {
@@ -139,6 +173,7 @@ public class SileroVAD {
             }
         }
 
+        // Conv1D computation + ReLU layers
         float[][] x = magnitude;
         for (int i = 0; i < 4; i++) {
             x = convRelu(x, w.convWeights[i], w.convBias[i], i == 1 || i == 2 ? 2 : 1);
@@ -148,6 +183,8 @@ public class SileroVAD {
         for (int i = 0; i < HIDDEN; i++) {
             features[i] = x[i][0];
         }
+
+        // LSTM Gate computation
         for (int g = 0; g < 4 * HIDDEN; g++) {
             gates[g] =
                     w.lstmBias[g]
@@ -162,6 +199,7 @@ public class SileroVAD {
             h[i] = sigmoid(gates[3 * HIDDEN + i]) * (float) Math.tanh(c[i]);
         }
 
+        // Final linear classification layer + ReLU activation
         float out = w.outBias;
         for (int i = 0; i < HIDDEN; i++) {
             out += w.outWeight[i] * Math.max(h[i], 0f);
@@ -169,7 +207,14 @@ public class SileroVAD {
         return sigmoid(out);
     }
 
-    /** Kernel 3, padding 1. */
+    /**
+     * Applies a 1D convolution with kernel size 3, symmetric padding 1, and ReLU activation.
+     *
+     * @param x input tensor of shape {@code [inChannels][inLength]}
+     * @param weight flattened convolution kernel weights
+     * @param bias bias vector per output channel
+     * @param stride temporal stride (e.g., 1 or 2)
+     */
     private static float[][] convRelu(float[][] x, float[] weight, float[] bias, int stride) {
         int inChannels = x.length;
         int inLength = x[0].length;
@@ -194,6 +239,16 @@ public class SileroVAD {
         return y;
     }
 
+    /**
+     * Computes the vector dot product of two float arrays over a given range.
+     *
+     * @param a first vector
+     * @param aOffset starting index in array {@code a}
+     * @param b second vector
+     * @param bOffset starting index in array {@code b}
+     * @param length number of vector elements to accumulate
+     * @return scalar dot product
+     */
     private static float dot(float[] a, int aOffset, float[] b, int bOffset, int length) {
         float sum = 0f;
         for (int i = 0; i < length; i++) {
@@ -202,6 +257,12 @@ public class SileroVAD {
         return sum;
     }
 
+    /**
+     * Computes the standard logistic sigmoid activation function: {@code 1 / (1 + e^{-v})}.
+     *
+     * @param v real input value
+     * @return transformed value in the range {@code [0, 1]}
+     */
     private static float sigmoid(float v) {
         return 1f / (1f + (float) Math.exp(-v));
     }
@@ -224,14 +285,33 @@ public class SileroVAD {
         return weights;
     }
 
+    /** Immutable container holding all model weights and biases. */
     private static class Weights {
+        /**
+         * Real and imaginary basis coefficients for the discrete STFT transformation in layout
+         * {@code [2 * BINS * WINDOW]}.
+         */
         final float[] stftBasis;
+
+        /** Convolution kernel weights for the 4 convolutional layers. */
         final float[][] convWeights = new float[4][];
+
+        /** Convolution bias vectors for the 4 convolutional layers. */
         final float[][] convBias = new float[4][];
+
+        /** Weight matrix projecting input features to the 4 LSTM gates. */
         final float[] lstmInput;
+
+        /** Recurrent weight matrix projecting previous hidden state to the 4 LSTM gates. */
         final float[] lstmHidden;
+
+        /** Bias terms for the 4 LSTM gates. */
         final float[] lstmBias;
+
+        /** Weight vector projecting the final activated hidden state to the output logit. */
         final float[] outWeight;
+
+        /** Scalar bias term for the final output projection. */
         final float outBias;
 
         Weights(FloatBuffer buffer) throws IOException {
