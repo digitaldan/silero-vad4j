@@ -25,6 +25,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.FloatBuffer;
 import java.util.Arrays;
+import java.util.Objects;
 
 /**
  * Silero VAD
@@ -108,6 +109,7 @@ public class SileroVAD {
      * @throws IllegalArgumentException when the frame doesn't have {@link #FRAME_SIZE} samples
      */
     public synchronized float process(short[] frame) {
+        Objects.requireNonNull(frame, "frame must not be null");
         checkLength(frame.length);
         shiftContext();
         for (int i = 0; i < FRAME_SIZE; i++) {
@@ -125,6 +127,7 @@ public class SileroVAD {
      * @throws IllegalArgumentException when the frame doesn't have {@link #FRAME_SIZE} samples
      */
     public synchronized float process(float[] frame) {
+        Objects.requireNonNull(frame, "frame must not be null");
         checkLength(frame.length);
         shiftContext();
         System.arraycopy(frame, 0, input, CONTEXT_SIZE, FRAME_SIZE);
